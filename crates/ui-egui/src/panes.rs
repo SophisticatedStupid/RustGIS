@@ -9,7 +9,7 @@ use rustgis_engine::analysis::{ParamKind, tools};
 use rustgis_engine::data::GeometryType;
 use rustgis_engine::map::raster::{Normalizer, RasterLegend, RasterStyle};
 use rustgis_engine::map::symbology::{
-    ClassRef, ClassStyle, LineCap, LineJoin, LineStroke, MAX_LABEL, MAX_STROKE_OFFSET, MAX_STROKE_WIDTH, MAX_STROKES, MAX_UNIQUE,
+    ClassRef, ClassStyle, Dash, LineCap, LineJoin, LineStroke, MAX_LABEL, MAX_STROKE_OFFSET, MAX_STROKE_WIDTH, MAX_STROKES, MAX_UNIQUE,
     OTHER_VALUES, normalize_label,
 };
 use rustgis_engine::map::tiles::{TileKind, TileLayer};
@@ -3918,6 +3918,49 @@ fn symbol_editor(app: &mut RustGisApp, ui: &mut Ui, s: Symbol, g: GeometryType, 
     });
 }
 
+/// The dash patterns the stroke editor offers, in stroke widths (dash, gap, …).
+const DASH_PRESETS: [(&str, Option<&[f32]>); 5] = [
+    ("Solid", None),
+    ("Dashed", Some(&[4.0, 2.0])),
+    ("Dotted", Some(&[1.0, 2.0])),
+    ("Dash-dot", Some(&[4.0, 2.0, 1.0, 2.0])),
+    ("Long dash", Some(&[8.0, 3.0])),
+];
+
+/// A dash pattern being typed in the stroke editor: the layer, the class (`None` for the layer's
+/// own strokes) and the text.
+type DashDraft = (u32, Option<ClassRef>, String);
+
+/// The text of `draft` if it was typed for `owner`'s stroke, else `None` (the stroke's own pattern
+/// shows).
+fn draft_for(draft: Option<DashDraft>, owner: &(u32, Option<ClassRef>)) -> Option<String> {
+    draft.filter(|(layer, class, _)| *layer == owner.0 && *class == owner.1).map(|(.., text)| text)
+}
+
+/// A dash pattern as the stroke editor shows it: `4 2`. Each length is written as it is kept, so
+/// the text reads back as the same pattern.
+fn dash_text(d: &Dash) -> String {
+    d.steps().iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" ")
+}
+
+/// The pattern the dash box sets when it loses focus: `None` unless the text was typed (focusing
+/// and leaving the box is no change), Escape wasn't what ended it, and it is a pattern other than
+/// `current`.
+fn dash_commit(typed: bool, escaped: bool, text: &str, current: Option<Dash>) -> Option<Option<Dash>> {
+    parse_dash(text).filter(|d| typed && !escaped && *d != current)
+}
+
+/// A dash pattern typed in the stroke editor: `Some(None)` for none (solid), `None` when it isn't
+/// one ([`Dash::new`]). Lengths are separated by spaces, commas or semicolons.
+fn parse_dash(text: &str) -> Option<Option<Dash>> {
+    let parts: Vec<&str> = text.split([' ', ',', ';']).filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() {
+        return Some(None);
+    }
+    let steps: Vec<f32> = parts.iter().map(|p| p.parse::<f32>().ok()).collect::<Option<_>>()?;
+    Dash::new(&steps).map(Some)
+}
+
 /// A stroke as `layer.lineStrokes` takes it.
 fn stroke_json(st: &LineStroke) -> Value {
     json!({
@@ -3927,6 +3970,7 @@ fn stroke_json(st: &LineStroke) -> Value {
         "cap": st.cap.code(),
         "join": st.join.code(),
         "level": st.level,
+        "dash": st.dash.map(|d| d.steps().to_vec()),
     })
 }
 
@@ -4048,12 +4092,33 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
             let w = (w * k).max(0.5);
             let y = r.center().y + st.offset * k;
             let pad = cap_pad(st, w);
-            if st.cap == LineCap::Round {
-                ui.painter().circle_filled(pos2(x0, y), w / 2.0, c32(c));
-                ui.painter().circle_filled(pos2(x1, y), w / 2.0, c32(c));
+            // The dashes along the preview, scaled as the strokes are. Solid when the map draws the
+            // pattern solid: under a pixel a round on this screen, at the pattern's own size.
+            let steps: Vec<f32> = st.dash.map(|d| d.even_steps().iter().map(|v| v * k).collect()).unwrap_or_default();
+            let mut runs = Vec::new();
+            if st.dash.is_some_and(|d| d.period() * ui.ctx().pixels_per_point() >= 1.0) && steps.iter().sum::<f32>() > 0.0 {
+                let (mut x, mut on) = (x0, true);
+                for step in steps.iter().cycle().take(4096) {
+                    if x >= x1 {
+                        break;
+                    }
+                    let end = (x + step).min(x1);
+                    if on {
+                        runs.push((x, end));
+                    }
+                    (x, on) = (end, !on);
+                }
+            } else {
+                runs.push((x0, x1));
             }
-            let (a, b) = if st.cap == LineCap::Square { (x0 - pad, x1 + pad) } else { (x0, x1) };
-            ui.painter().line_segment([pos2(a, y), pos2(b, y)], Stroke::new(w, c32(c)));
+            for (from, to) in runs {
+                if st.cap == LineCap::Round {
+                    ui.painter().circle_filled(pos2(from, y), w / 2.0, c32(c));
+                    ui.painter().circle_filled(pos2(to, y), w / 2.0, c32(c));
+                }
+                let (a, b) = if st.cap == LineCap::Square { (from - pad, to + pad) } else { (from, to) };
+                ui.painter().line_segment([pos2(a, y), pos2(b, y)], Stroke::new(w, c32(c)));
+            }
         }
         // The line's direction.
         let (ay, ax) = (r.max.y - 6.0, r.max.x - 8.0);
@@ -4162,6 +4227,47 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
                             set(app, LineStroke { join: j, ..st });
                         }
                     }
+                });
+                ui.end_row();
+                ui.label(tl!("Dash"));
+                ui.horizontal(|ui| {
+                    // The pattern as typed, kept while the box has focus; set when it loses it. The
+                    // draft remembers whose stroke it is, so it never shows or lands on another
+                    // layer's or class's stroke at the same place.
+                    let id = ui.scope_id().with(("stroke_dash", i));
+                    let owner = (l.id, class.cloned());
+                    let shown = st.dash.map(|d| dash_text(&d)).unwrap_or_default();
+                    let draft = draft_for(ui.data_mut(|m| m.get_temp::<DashDraft>(id)), &owner);
+                    let typed = draft.is_some();
+                    let mut text = draft.unwrap_or(shown);
+                    let edit = egui::TextEdit::singleline(&mut text).hint_text(tl!("Solid")).desired_width(84.0);
+                    let r =
+                        ui.add(edit).on_hover_text(tl!("Dash and gap lengths in points, in turn, such as 4 2. Empty for a solid line."));
+                    if r.changed() {
+                        ui.data_mut(|m| m.insert_temp::<DashDraft>(id, (owner.0, owner.1.clone(), text.clone())));
+                    }
+                    // Text that isn't a pattern is outlined: it won't be kept when the box loses focus.
+                    if parse_dash(&text).is_none() {
+                        ui.painter().rect_stroke(r.rect, CornerRadius::same(2), egui::Stroke::new(1.5, t.red), egui::StrokeKind::Outside);
+                    }
+                    if r.lost_focus() {
+                        ui.data_mut(|m| m.remove::<DashDraft>(id));
+                        // As the class label box does, Escape drops what was typed.
+                        let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                        if let Some(dash) = dash_commit(typed || r.changed(), escaped, &text, st.dash) {
+                            set(app, LineStroke { dash, ..st });
+                        }
+                    }
+                    let preset = egui::ComboBox::from_id_salt(("stroke_dash_preset", i)).selected_text("").width(24.0);
+                    preset.show_ui(ui, |ui| {
+                        for (label, steps) in DASH_PRESETS {
+                            // Scaled by the stroke's width, so a thick line's dashes stay in proportion.
+                            let dash = steps.and_then(|s| Dash::new(&s.iter().map(|v| v * w.max(1.0)).collect::<Vec<_>>()));
+                            if ui.selectable_label(dash == st.dash, tl!(label)).clicked() {
+                                set(app, LineStroke { dash, ..st });
+                            }
+                        }
+                    });
                 });
                 ui.end_row();
                 if l.stroke_levels {
@@ -4961,6 +5067,35 @@ mod tests {
             (Some("100"), Some("All"))
         );
         assert_eq!(f.values.get("output").map(String::as_str), Some("kept"), "not given");
+    }
+
+    /// A dash being typed shows only on the stroke of the layer and class it was typed for.
+    #[test]
+    fn a_dash_draft_stays_with_its_layer_and_class() {
+        let draft = || Some((3, Some(ClassRef::Index(1)), "4 2".to_string()));
+        assert_eq!(draft_for(draft(), &(3, Some(ClassRef::Index(1)))).as_deref(), Some("4 2"));
+        // Another layer, another class, or the layer's own strokes show their own pattern.
+        assert_eq!(draft_for(draft(), &(4, Some(ClassRef::Index(1)))), None);
+        assert_eq!(draft_for(draft(), &(3, Some(ClassRef::Index(2)))), None);
+        assert_eq!(draft_for(draft(), &(3, None)), None);
+        assert_eq!(draft_for(None, &(3, None)), None);
+    }
+
+    /// The dash box shows a pattern as kept, and sets one only when it was typed and not escaped:
+    /// focusing and leaving it never rounds the stroke's pattern.
+    #[test]
+    fn the_dash_box_sets_only_a_typed_pattern() {
+        let kept = Dash::new(&[5.332, 2.666]);
+        let text = dash_text(&kept.unwrap());
+        assert_eq!(text, "5.332 2.666");
+        assert_eq!(parse_dash(&text), Some(kept), "the shown text reads back as the same pattern");
+        assert_eq!(dash_commit(false, false, &text, kept), None, "focused and left");
+        assert_eq!(dash_commit(false, false, "4 2", kept), None, "not typed");
+        assert_eq!(dash_commit(true, true, "4 2", kept), None, "Escape drops it");
+        assert_eq!(dash_commit(true, false, "4 2", kept), Some(Dash::new(&[4.0, 2.0])));
+        assert_eq!(dash_commit(true, false, "", kept), Some(None), "emptied: solid");
+        assert_eq!(dash_commit(true, false, "4 x", kept), None, "not a pattern");
+        assert_eq!(dash_commit(true, false, "5.332 2.666", kept), None, "typed back as it was");
     }
 
     /// The Strokes for picker lists a value listed twice once, for its first class (the one its
