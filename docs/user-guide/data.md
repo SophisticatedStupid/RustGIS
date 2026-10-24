@@ -8,9 +8,9 @@ Formats](data-formats.md).
 | Format | Read | Write |
 | --- | --- | --- |
 | GeoJSON (`.geojson`, `.json`) | Yes | Yes |
-| Delimited text (`.csv`, `.tsv`, `.txt`) with x/y columns in any coordinate system, or WKT geometry | Yes | Yes |
-| Shapefile (`.shp` + `.dbf`, or zipped in a `.zip`) | Yes (the web app opens zips) | Yes (`share.exportLayer`) |
-| GeoPackage (`.gpkg`, every feature table) | Yes | Yes (desktop) |
+| Delimited text (`.csv`, `.tsv`, `.txt`) with x/y columns in a supported coordinate system, or WKT geometry | Yes | Yes |
+| Shapefile (`.shp` + `.dbf`, or zipped in a `.zip`) | Yes (the web app also accepts sidecar files picked or dropped together) | Yes (`share.exportLayer`) |
+| GeoPackage (`.gpkg`, feature tables) | Yes | Yes (desktop) |
 | GeoParquet (`.parquet`, `.geoparquet`, WKB geometry) | Yes | Yes |
 | FlatGeobuf (`.fgb`) | Yes | Yes (`share.exportLayer`) |
 | KML/KMZ (with their styles), GPX | Yes | Yes |
@@ -22,10 +22,11 @@ Formats](data-formats.md).
 | Through GDAL: AutoCAD DWG, MapInfo TAB, OpenStreetMap XML, File Geodatabases RustGIS can't read itself… | Yes (desktop, when GDAL is installed) | No |
 | PostgreSQL/PostGIS databases, read live (large tables a view at a time) | Yes (desktop) | No |
 | MySQL and MariaDB databases, read live (large tables a view at a time) | Yes (desktop) | No |
+| SQL Server and Azure SQL databases, read live (large tables a view at a time) | Yes (desktop) | No |
 | DuckDB databases (`.duckdb`, `.ddb`) and SQL queries | Yes (desktop, when DuckDB is installed) | No |
-| KML, GPX, CSV with WKT geometry | No | Yes (Analyze › Workflows › Data Interop) |
 | GeoTIFF and cloud-optimised GeoTIFF (`.tif`, `.tiff`) | Yes | Yes |
 | ASCII grid (`.asc`, with an optional `.prj`) | Yes | No |
+| Unreferenced TIFF and PNG scans; JPEG with `"as": "scan"` | Yes | GeoTIFF after georeferencing |
 | Through GDAL: JPEG 2000, ERDAS Imagine, SRTM HGT, DTED, NetCDF, HDF, ENVI, SAGA… | Yes (desktop, when GDAL is installed) | No |
 | Web tiles: XYZ/TMS/WMS rasters, Mapbox Vector Tiles, MapLibre styles, PMTiles and MBTiles archives | Yes | Yes (Analyze › Create Hosted Imagery) |
 | RustGIS project (`.rgis`; older `.rgisx` files open too) | Yes | Yes |
@@ -50,11 +51,30 @@ the project, from two fields of coordinates and their coordinate system. In a te
 **Home › Add Data › Graphics Layer** adds a layer for [drawn graphics](cartography.md#graphics),
 and **Data › Layer Templates** adds empty layers with ready-made schemas to draw into.
 
-Vector coordinates are WGS 84 longitude/latitude and are displayed in Web Mercator. GeoPackage,
-GeoParquet and FlatGeobuf files in another coordinate system (any EPSG code) are converted as they
-are read. Rasters keep
-their own coordinate system (any EPSG code, such as UTM zones or national grids) and are
-reprojected on the fly as they draw.
+Vector geometry is stored as WGS 84 longitude/latitude. Data in another supported coordinate
+system is converted as it is read; Shapefiles use their `.prj`, and formats such as GeoPackage,
+GeoParquet and FlatGeobuf carry their coordinate system in the file. Rasters keep their own
+coordinate system and are reprojected as they draw. The map uses Web Mercator by default, but
+**View › Projection** can change it; see [Maps](maps.md).
+
+Shapefile text uses a supported `.cpg` encoding, otherwise the `.dbf` code page, with UTF-8 as
+the fallback. Keep the sidecar files together.
+
+## Attribute tables and fields
+
+Open a feature layer's table with ++ctrl+t++ (++cmd+t++ on macOS), **Home › Selection › Attributes**
+or **Attribute Table** on a feature layer's **Data** tab (`table.open`). Rows and map selections stay in sync.
+Standalone tables open from their right-click menu; their cells are read only. See [The attribute table](analysis.md#the-attribute-table) for
+sorting, filtering, selection and the SQL `WHERE` clause syntax used by **Select By Attributes**
+and **Definition Query**. These clauses filter a layer; they are not DuckDB queries.
+
+For an editable feature layer, double-click a cell to change it. The table's toolbar also adds
+fields, calculates field expressions and opens **Calculate Geometry** (`edit.calculateGeometry`).
+The geometry calculator fills a new double field or an existing numeric field with area,
+perimeter, length or point X/Y, for all or selected features. Point coordinates can be WGS 84
+degrees or a supported projected EPSG system's units. See [Editing](editing.md) for field
+calculations and data-design rules. Streamed layers must first be loaded with **Load All
+Features**.
 
 ## Formats through GDAL
 
@@ -116,12 +136,14 @@ column becomes a layer (`"layer"` picks one).
 
 ### PostgreSQL and PostGIS
 
-**Home › Add Data › Database…** (`layer.addDatabase`) connects to a PostgreSQL database with
-PostGIS and reads its tables live. RustGIS talks to the server itself (nothing else to install;
-TLS as libpq does it). `sslmode=prefer` (the default) and `require` encrypt the connection but
-don't check the server's certificate, so they don't protect against a server in the middle:
-use `verify-full` (or `verify-ca`, which here checks the host name too) on networks you don't
-trust. The certificate is checked against `sslrootcert` (a private authority's PEM file) or the
+**Home › Add Data › Database…** (`layer.addDatabase`, desktop) connects to a PostgreSQL database with
+PostGIS and reads its tables live. The dialog takes a saved connection or a typed one, a password,
+a table (**List Tables**, or all tables with geometry) and a coordinate system for geometry that
+doesn't say its own. RustGIS talks to the server itself (nothing else to install;
+TLS as libpq does it). `sslmode=prefer` (the default) uses TLS only when the server offers it, and otherwise connects
+without encryption, so a server in the middle can force a plaintext connection. `require` always
+uses TLS but doesn't check the server's certificate. On networks you don't trust, use
+`verify-full` or `verify-ca`; both check the host name here. The certificate is checked against `sslrootcert` (a private authority's PEM file) or the
 web's roots. `disable` turns TLS off. The connection is a libpq connection string
 (`host=localhost port=5432 dbname=gis user=postgres`) or a `postgresql://user@host/dbname`
 address; what it leaves out comes from `PGHOST`, `PGPORT`, `PGUSER` and `PGDATABASE`, as with
@@ -141,17 +163,17 @@ type, and empty tables (such as the TIGER geocoder's) are left out. Features kee
 views: the table's integer primary key, else the row's place in the table (the rows of a view or
 a partitioned table without a key are numbered as read, so theirs can change between views).
 
-The password is kept until RustGIS closes and never written to the project, which names the
-connection without it. Without one, `PGPASSWORD` or libpq's password file (`~/.pgpass`, or
-`%APPDATA%\postgresql\pgpass.conf`) serve when you add a table. A project keeps a streamed
-table's connection and reads it again when it opens, sending only a password given in this
-session: a project file could name any host, and must never get your own credentials. When the
-server wants a password and the layer's database matches a saved connection, the project says
-which connection is waiting. Right-click that connection in **Data Sources › Connections**, or a
-waiting layer, and choose **Log In…**. Saving the password reopens every layer from that database.
-Without a matching connection, connect again with **Add Data › Database…** (the layer reads again
-when the project is next opened). A small table's features are kept in the project as they were
-when added.
+Passwords are never written to the project. By default, an entered password lasts until
+RustGIS closes. For a named desktop connection, **Remember on this computer** is an unchecked
+opt-in to the operating system's password store; see [Named connections](#named-connections)
+for reconnect, selection and forgetting rules. Opening a project can use a remembered password
+only for a unique, exact saved-address match, or an explicit session selection. Otherwise a
+waiting layer offers **Log In…**, or a chooser when several remembered connections match.
+Without a matching connection, connect again with **Add Data › Database…**.
+`PGPASSWORD` or libpq's password file (`~/.pgpass`, or
+`%APPDATA%\postgresql\pgpass.conf`) can serve when you explicitly add a table without a password;
+opening a project never newly authorizes these ambient credentials. A small table's features
+are kept in the project as they were when added.
 
 `layer.addSql` takes a connection as its `"database"` too, through DuckDB's `postgres` extension
 (installed the first time, like DuckDB Spatial), so a query names its tables plainly; the password
@@ -209,10 +231,11 @@ the column's SRID (MySQL's per-column SRID, MariaDB's `REF_SYSTEM_ID`) or else i
 becomes a layer per type. Features keep their ids between views from the table's integer primary
 key; a table without one has its rows numbered as read, so theirs can change between views.
 
-The password is kept until RustGIS closes and never written to the project; `MYSQL_PWD` serves
-when you add a table without one, and a project opening sends only a password given in this
-session, as for PostGIS. SQL queries (`layer.addSql`, the SQL pane) don't run on MySQL or MariaDB
-databases.
+Passwords are never written to the project and last for the session unless you opt in with
+**Remember on this computer** for a named desktop connection. The same exact-address reconnect,
+chooser and Forget rules in [Named connections](#named-connections) apply. `MYSQL_PWD` can serve when you explicitly
+add a table without a password, but opening a project never newly authorizes it.
+SQL queries (`layer.addSql`, the SQL pane) don't run on MySQL or MariaDB databases.
 
 ## SQL Server and Azure SQL
 
@@ -256,13 +279,15 @@ read or sample locally instead of sending a viewport polygon to the server. A sm
 therefore miss features in a large sampled table. `geometry` layers and higher compatibility
 levels retain server-side viewport filtering.
 
-The provider only reads data; edits are not written back to SQL Server. The password is kept
-until RustGIS closes, never in the project. Secret-named query values such as `pwd` and
-`access_token` are removed from saved connection addresses. `SQLCMDPASSWORD` serves only when adding a database,
-not when reopening a project. A streamed layer reopening sends only credentials given this
-session; Windows integrated sign-in also requires that same address to have been added this
-session. Reconnect with **Add Data › Database…** when needed. SQL queries (`layer.addSql`, the SQL
-pane) do not run on SQL Server connections.
+The provider only reads data; edits are not written back to SQL Server. Passwords are never
+written to the project and last for the session unless **Remember on this computer** is
+checked for a named desktop connection. The [named-connection rules](#named-connections) govern
+remembered reconnects and explicit selection. Secret-named query values such as `pwd` and
+`access_token` are removed from saved connection addresses. `SQLCMDPASSWORD` serves only when
+explicitly adding a database, not when opening a project. Windows integrated sign-in still
+requires that same address to have been added this session: opening a project does not
+authorize Windows identity. Reconnect with **Add Data › Database…** when needed. SQL queries
+(`layer.addSql`, the SQL pane) do not run on SQL Server connections.
 
 ## Web Data
 
@@ -272,8 +297,8 @@ page of their own: [Web Data](web-data.md).
 
 ## Geocoding addresses
 
-**Home › Add Data › Geocode Addresses…** (`layer.geocode`) turns a table's addresses into points:
-a CSV of addresses without coordinates is added as a standalone table, then each row's address
+**Home › Add Data › Geocode Addresses…** (`layer.geocode`) turns a standalone table's or a
+layer's addresses into points: a CSV of addresses without coordinates is added as a standalone table, then each row's address
 fields (`"address"`: a field, or several such as street, city and country, joined with commas)
 are looked up, each distinct address once. The result is a new point layer holding every field
 plus `geocoded`, what the geocoder called the place; rows that weren't found stay in its table
@@ -331,8 +356,8 @@ before it connects or lists; plugins can't connect, and need the network permiss
 
 ## Data Sources
 
-The **Data Sources** pane (**View › Windows › Data Sources**, `ui.pane.sources`) gathers the
-places data comes from:
+The **Data Sources** pane (**View › Windows › Data Sources**, `ui.pane.sources`; **Home › Add
+Data › Connections…** also opens it) gathers the places data comes from:
 
 - **Favourites**: any source, right-clicked and added.
 - **Recent**: the last 20 sources added (files, web addresses, tile layers, services, database
@@ -370,16 +395,17 @@ database is kept without its password. The commands `sources.list`, `sources.sav
 
 ### Named connections
 
-In the pane, **New Connection** and **Edit…** let you set the name, group and address.
-Leave a new connection's name blank to derive it from the address. **Test** checks the form
-without saving it: web-service, catalogue, STAC and S3 requests run in the background on both
-desktop and web; database tests run synchronously on desktop. Database rows remain visible
-but cannot be opened or tested in the web app. Earth Search and Planetary Computer remain
-available under **Library**.
+In the pane, **New Connection ▾** and **Edit…** let you set the name, group and address;
+**Home › Add Data › New Connection** opens the same form for a chosen kind. Leave a new
+connection's name blank to derive it from the address. **Test** checks the form without saving
+it: web-service, catalogue, STAC and S3 requests run in the background on both desktop and web;
+database tests run synchronously on desktop. The web app doesn't offer database kinds for new
+connections; saved database rows remain visible but cannot be opened or tested there. Earth
+Search and Planetary Computer remain available under **Library**.
 
-**From Service…** (including **Catalogue search (CSW)**), **From Database…**, **STAC Search**
-and **S3…** can use saved connections directly. Service, database and S3 dialogs offer a
-**Saved connection** picker; STAC includes saved connections in its existing API/catalog list.
+**From Service…** (including **Catalogue search (CSW)**), **Database…**, **STAC Search…** and
+**S3…** can use saved connections directly. Service, database and S3 dialogs offer a **Saved
+connection** picker; STAC includes saved connections in its existing API/catalog list.
 Picking one keeps its identity, not just its address: two connections can point to the same
 server with different names or users.
 
@@ -434,29 +460,80 @@ names the command and parameters that add it (`service.add`, `layer.addDatabase`
 it left some out. Like `connection.test`, it reads the address itself on the desktop and the
 command line; with `probe: true` it returns the address to fetch, and the app passes what it
 fetched back as `answer` (and further `documents` when a service asks for them, as `next`).
-Browsing never changes the project or the saved connections.
+Browsing never changes the project. When a saved password turns out to be missing, or to have been
+saved for another address, the connection loses its **Saved password** marker; the stored entry
+itself is left for **Forget Saved Password**, an address edit or a removal to delete.
 
-Addresses are saved without passwords or tokens. `connection.login` remembers a database
-`password`, or S3 `accessKeyId`, `secretAccessKey` and optional `sessionToken`, for this session
-only, using the same credential stores as the existing add commands. With login parameters,
-`connection.test` logs in first; a failed listing does not undo that session login. A database
-login also reopens project layers that read the same password-free address and were refused for a
-missing or wrong password. `connection.list` gives such waiting layers as `waiting`, and
-`connection.login` gives `reopened` and `failed` when it tries any of them. A server that is down
-or a missing table is not reported as waiting for a login.
+Addresses are saved without passwords or tokens. Database passwords entered through
+`connection.login` are kept separately by connection ID for this session.
+On desktop, **Remember on this computer** in the new, edit and login forms is always unchecked
+initially. Checking it opts that submitted password into the operating system's password store;
+**Test** never saves it. The command equivalent is
+`connection.login {"id":"c1","password":"…","remember":true}`; `remember` defaults to false.
+If the store is missing, unavailable or denies access, the login remains usable for the
+session and a visible warning says it was not remembered (`passwordSaved:false` in the result).
+The browser and command line have no OS-store hook and remain session-only.
+
+The stored envelope is bound to the connection's ID, kind and cleaned address, including its
+username. Renaming or regrouping preserves it. Changing the address or username, or removing
+the connection, deletes the old stored password before committing the change; if deletion
+fails, the definition remains unchanged. Invalid edits do not delete a password.
+Duplicating a connection copies neither its stored password nor its session login.
+**Saved password** marks a remembered connection without reading the store just to display it.
+**Forget Saved Password** (`connection.forgetPassword {"id":"c1"}`) deletes the stored value,
+but leaves an explicitly entered session password and already-open layers alone. Forgetting an
+inactive connection never selects it or replaces another connection's active password.
+
+Projects remain address-only: they contain neither passwords nor saved connection IDs.
+On opening a project, one exact matching remembered connection may reconnect automatically.
+Matching strips passwords and outer wrappers/whitespace, but does not infer that URI and
+libpq forms, reordered parameters, host aliases or different usernames mean the same server.
+Several eligible remembered matches open a chooser with no default; cancel leaves the layers
+unavailable. Choose a connection explicitly, or use `connection.login {"id":"c2"}` to select
+its existing session or remembered password without exposing it. Selection lasts for this
+session, not in the project. `connection.list` reports secret-free `loginRequests` with the
+reason, database label, candidate IDs and affected-layer count; ambiguous layers are not
+attributed to the first saved row. `loggedIn` means this ID has a session password or an already
+loaded remembered password available; it does not certify successful server authentication.
+
+Explicit session input or selection takes precedence over a saved password; a saved password
+takes precedence over existing ambient fallbacks on explicitly initiated connections.
+Opening a project never newly authorizes environment/password-file credentials or Windows
+identity. A positively refused saved password is not retried for the rest of the session,
+and no other saved password is tried automatically. Its old OS-store value is retained.
+The fresh login form has an empty password and Remember unchecked: an unchecked replacement is
+session-only and does not overwrite or delete the old value; checking Remember and successfully
+saving replaces it. A password the server refuses is not kept as this session's, and is not sent
+to the database's other layers. A refused typed login restores the previous active password,
+selection and activation; with no previous password, the attempted value is removed.
+If a password reused from this ID's session cache is refused, that cached value, its owned
+driver entry and activation are cleared, and a password is requested. An identical saved value
+is also suppressed for this session; a different saved value is not marked refused by this
+attempt. The OS-store entry is retained in either case.
+A transport error or missing table is not a wrong-password prompt. Use Forget to delete a
+previously saved password.
+
+A database login reopens waiting layers at the same password-free address;
+`connection.list` reports them as `waiting`, and `connection.login` returns `reopened` and
+`failed` counts. Adding, editing or removing a saved connection, or adding a layer, resolves
+only the databases that change: an unrelated database that is down is not connected to again.
+`connection.test` never persists a password. For a named connection, if the
+server positively refuses a password typed for that Test, the previous per-ID session credential,
+selection and active address password are restored (or the attempted credential is removed if
+none existed).
+A failure after authentication, such as a table-listing error, keeps the new session login.
+S3 `accessKeyId`, `secretAccessKey` and optional `sessionToken` remain session-only.
 S3 profiles and environment credentials remain subject to the existing endpoint restrictions;
 editing an S3 name, endpoint or options disconnects its session login. S3 shares the name-based
 session registry used by the S3 dialog and `s3.connect`, so editing or removing a saved
 connection also affects a session entry of the same name created there.
-Renaming clears the runtime entries under both the old and new names, so the renamed
+Renaming clears runtime entries under both the old and new names, so the renamed
 connection cannot inherit an unrelated login at its destination name.
 Web-service logins are not supported. Plugins may list connections but cannot manage, log in
-to, test or browse them. The in-app assistant asks for approval each time for those operations;
-external assistants using MCP cannot run them. Even `probe: true` needs approval: connection
-operations cannot be approved for the whole conversation.
-Database passwords are shared by public DSN for the session, including existing layers and
-other named connections using that DSN. Editing or removing a named connection does not revoke
-that shared login; changing its address does not transfer the old password to the new address.
+to, forget passwords for, test or browse them. The in-app assistant asks for fresh approval
+each time for those operations, including Forget and scripted calls; external assistants
+using MCP cannot run them. Even `probe: true` needs approval: connection operations cannot be
+approved for the whole conversation.
 
 Desktop and web apps save connections with their preferences (`connections` in desktop
 `prefs.json`, `rustgis.connections` in web localStorage). The first load imports saved services,
@@ -474,8 +551,9 @@ features are read in place rather than loaded whole, avoiding an in-memory copy 
 dataset. The layer reads features in view in the background as the map moves, using spatial
 indexes: the GeoPackage R-tree, the FlatGeobuf packed R-tree, GeoParquet row-group bounding
 boxes, or a cached Shapefile R-tree built from the shapes' bounding boxes. When a
-view holds more than 250,000 features (100,000 in the web app), the layer draws an evenly spread
-sample of them and its tooltip in Layers says so: zoom in to see them all. Smaller files load
+local file's view holds more than 250,000 features (100,000 in the web app), the layer draws an
+evenly spread sample of them and its tooltip in Layers says so: zoom in to see them all. Remote files have lower limits (see
+[Data formats](data-formats.md)). Smaller files load
 whole; `layer.addData` with `"stream": true` or `false` overrides the choice.
 
 On the desktop, opening a large Shapefile for the first time scans its record headers to build
@@ -505,8 +583,10 @@ file over 256 MB through a buffer, so it is never held whole), and each view par
 features it shows. A single feature, a bare geometry or TopoJSON is loaded whole.
 
 A streamed layer works like any other for symbology, labels, pop-ups, selection and the
-attribute table (which lists the features read for the view). Geoprocessing tools read the whole
-file. Edits are refused, since the features are read again as the view moves: right-click the
+attribute table (which lists the features read for the view). Geoprocessing tools, exports and
+**Load All Features** read the whole source, up to 2 million features (500,000 in the web app);
+a larger source is refused rather than processed as a sample. A tool given a streamed layer with
+a selection uses the selected features read for the view. Edits are refused, since the features are read again as the view moves: right-click the
 layer in Layers and choose **Load All Features** (`layer.loadAll`) to load it into memory and
 edit it. Projects save the layer's file path, not its features, and read the file again when they
 open; a browser upload is kept in the project.
@@ -549,8 +629,10 @@ serialization continue to use the original source data and existing read limits.
 </figure>
 
 Add a GeoTIFF or an ASCII grid with **Add Data**, by dropping it on the window, or in the web app
-by picking it. An ASCII grid takes its coordinate system from a `.prj` file next to it (as a Shapefile does);
-otherwise, and always in the web app, which only sees the one file, it must be in
+by picking it. Local ASCII grids can be up to 1 GiB; ASCII-grid uploads are limited to 256 MiB in the web app.
+A TIFF or PNG without coordinates opens as a scan to place with **Georeference**; see
+[Supported Data Formats](data-formats.md). An ASCII grid takes its coordinate system from a `.prj`
+file next to it (as a Shapefile does); otherwise, and always for uploads, it must be in
 longitude/latitude degrees. On the desktop, a GDAL `.aux.xml` file next to a raster (`dem.tif.aux.xml`
 or `dem.aux.xml`) names its bands from their descriptions, gives the no-data value when the file
 has none, and supplies the band statistics when only an overview of the raster is read.
@@ -568,9 +650,11 @@ might not. Exported to a file it is written tile by tile, never held whole in me
 builds it in memory to download it).
 GeoTIFFs may be regular or cloud-optimised: grey, RGB(A), palette (coloured by the file's colour
 table, as land cover such as the NLCD is) or multiband, of any pixel type, tiled or striped, and
-compressed with Deflate, LZW, PackBits, JPEG or Zstandard. The coordinate system is an EPSG code,
+compressed with Deflate, LZW, PackBits, JPEG or Zstandard. JPEG-compressed YCbCr images are shown
+as RGB; other YCbCr and CMYK images aren't read. A rotated or skewed image is resampled to a
+north-up grid as it is read. The coordinate system is an EPSG code,
 or the file's own projection described in its GeoKeys (Albers, Lambert conformal conic, transverse
-Mercator, Mercator, Lambert azimuthal, stereographic, equirectangular and others), which an
+Mercator, Mercator, Lambert azimuthal, stereographic, equirectangular, sinusoidal and others), which an
 exported GeoTIFF keeps. A raster too large to hold in memory (more than 120 million samples, 32
 million in the web app) opens from its largest overview that fits; one without overviews opens as
 an overview made as it is read, a strip or tile at a time (every second, fourth… pixel each way),
@@ -709,14 +793,17 @@ RustGIS saves pieces of a project as files you can share and reuse:
 | Styles (saved symbology) | `.rgisstyle` | Style › Styles › New Style, then Publish › Save As › Style Items | Style › Styles › Add Style File |
 | [Color ramps](cartography.md#custom-color-ramps) | `.rgisramp` (also reads QGIS `.xml`/`.qml`, GDAL color `.txt` and GMT `.cpt`) | Publish › Save As › Color Ramps, or by hand | Style › Styles › Add Color Ramp File |
 | Project template (the setup without features) | `.rgistemplate` | Home › Templates, or Publish › Save As | Home › Templates › Open Custom Template |
-| Project package (everything, rasters included) | `.rgispkg` | Publish › Package › Project | Project › Open, or drop it on the window |
+| Project package (the project, with linked raster files embedded while they fit) | `.rgispkg` | Publish › Package › Project | Project › Open, or drop it on the window |
 | Map package / mobile map package | `.rgismpk` | Publish › Package › Map or Mobile Map | Home › Import |
 | Results package (geoprocessing history and outputs) | `.rgisgpk` | Publish › Package › Results | any zip tool |
 | Task (guided command steps) | `.rgistask` | Analyze › Task, Publish › Save As › Task Item | Analyze › Task › Import Task |
 | Bookmarks (as longitude, latitude and scale) | `.rgisbookmarks` | Home › Navigate › Bookmarks › Export Bookmarks | Home › Navigate › Bookmarks › Import Bookmarks |
 | Layout | `.rgislayout` | Publish › Save Layout File | Home › New Layout › Import Layout |
 
-Packages are zip files. A mobile map package keeps only the visible layers and simplifies their
+Packages are zip files. Project and map packages can newly embed a combined 512 MiB of linked
+raster files on the desktop (128 MiB in the web app); a raster that doesn't fit stays linked.
+Already embedded uploads are retained. Local streamed vector files, databases and web layers
+stay linked to their sources. A mobile map package keeps only the visible layers and simplifies their
 geometry, for phones and tablets. Styles can also be imported from the layers of a layer file,
 map file or project. Data › Layer Templates adds empty layers with ready-made schemas (places,
 routes, areas, observations…) to draw into. Add Folder connects a folder to the Browser, which

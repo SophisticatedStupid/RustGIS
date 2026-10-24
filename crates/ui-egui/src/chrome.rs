@@ -99,7 +99,7 @@ pub fn header(app: &mut RustGisApp, ui: &mut Ui) {
                     pos2(full.min.x - layout.left_pad, full.min.y),
                     pos2(full.max.x + HEADER_PAD, full.max.y + layout.bottom_pad),
                 );
-                let drag = ui.interact(bar, egui::Id::new("header_drag"), Sense::click_and_drag());
+                let drag = ui.interact(bar, egui::Id::unique("header_drag"), Sense::click_and_drag());
                 if drag.double_clicked() {
                     let maximized = ui.ctx().input(|i| i.viewport().maximized).unwrap_or(false);
                     let action = app.ui.titlebar.map_or(DoubleClick::Zoom, |m| m.double_click);
@@ -160,7 +160,8 @@ pub fn header(app: &mut RustGisApp, ui: &mut Ui) {
                 // Command search on the right: full width when there is room, a round icon button
                 // otherwise. It never reaches into the toolbar.
                 let label = tl!("Command Search");
-                let hint = if cfg!(target_os = "macos") { "⌘K" } else { "Ctrl+K" };
+                // As egui reads the keys: ⌘ on a Mac, the browser's too (from its user agent).
+                let hint = if ui.ctx().os().is_mac() { "⌘K" } else { "Ctrl+K" };
                 let right = full.max.x;
                 let room = right - qat_end;
                 let full_w = (text_w(ui, label, regular(12.0)) + text_w(ui, hint, regular(11.0)) + 70.0).clamp(200.0, 260.0);
@@ -174,7 +175,7 @@ pub fn header(app: &mut RustGisApp, ui: &mut Ui) {
                     26.0
                 };
                 let sr = Rect::from_min_max(pos2(right - sw, full.center().y - 12.0), pos2(right, full.center().y + 12.0));
-                let resp = ui.interact(sr, egui::Id::new("command_search_box"), Sense::click());
+                let resp = ui.interact(sr, egui::Id::unique("command_search_box"), Sense::click());
                 ui.painter().rect_filled(sr, CornerRadius::same(12), if resp.hovered() { t.hover } else { t.input });
                 ui.painter().rect_stroke(sr, CornerRadius::same(12), Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
                 let compact = sw < 100.0;
@@ -642,6 +643,7 @@ pub(crate) const UI_COMMANDS: &[(&str, &str, &str)] = &[
     ("ui.pane.bookmarks", "Bookmarks Pane", "Home › Navigate › Bookmarks"),
     ("ui.theme", "Toggle Dark Mode", "View"),
     ("ui.map.gpu", "Toggle GPU Rendering", "View"),
+    ("ui.importShapefile", "Import Shapefile with Projection…", "Home › Add"),
     ("ui.measurementUnits", "Toggle Imperial Measurements", "Home › Inspect › Measure"),
     ("ui.exportMap", "Export Map…", "Publish › Output"),
     ("ui.checkUpdate", "Check for Updates…", "Help › Help"),
@@ -658,6 +660,7 @@ enum SearchAction {
     Workflow(&'static str),
 }
 
+/// Routes commands requiring user input to their dialogs rather than executing empty params.
 fn search_action(id: &str) -> Option<SearchAction> {
     use crate::RightPane;
     use SearchAction::{Command, Dialog, OpenItem, Pane, SaveItem, Workflow};
@@ -695,6 +698,8 @@ fn search_action(id: &str) -> Option<SearchAction> {
         "layer.addEncodedPolyline" => Dialog("addPolyline"),
         "layer.geocode" => Dialog("geocode"),
         "layer.rename" => Dialog("renameLayer"),
+        "layer.defineProjection" => Dialog("defineProjection"),
+        "ui.importShapefile" => Dialog("addShapefile"),
         "layer.definitionQuery" => Dialog("definitionQuery"),
         "layer.symbology" | "raster.symbology" | "layer.color" | "layer.outline" | "layer.lineStrokes" | "layer.ramp" => {
             Pane(RightPane::Symbology)
@@ -812,7 +817,7 @@ pub fn command_search(app: &mut RustGisApp, ctx: &egui::Context) {
     let screen = ctx.content_rect();
     let width = (screen.width() - 48.0).clamp(220.0, 520.0);
     let list_h = (screen.height() - 190.0).clamp(120.0, 360.0);
-    let modal = egui::Modal::new(egui::Id::new("command_search")).show(ctx, |ui| {
+    let modal = egui::Modal::new(egui::Id::unique("command_search")).show(ctx, |ui| {
         ui.set_width(width);
         ui.horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
@@ -929,7 +934,7 @@ pub fn command_search(app: &mut RustGisApp, ctx: &egui::Context) {
                 let on = why.is_none();
                 let mut b = egui::Button::new(egui::RichText::new(label).size(13.0)).frame(false).min_size(vec2(row_w, 26.0));
                 // The command's shortcut after its location.
-                let keys = if id.contains(':') { String::new() } else { crate::keymap::shortcut_text(app, id, &Value::Null) };
+                let keys = if id.contains(':') { String::new() } else { crate::keymap::shortcut_text(ui.ctx(), app, id, &Value::Null) };
                 let right = match (show_loc, keys.is_empty()) {
                     (true, false) => format!("{loc}   {keys}"),
                     (true, true) => loc.clone(),
@@ -1062,6 +1067,7 @@ pub fn about(app: &mut RustGisApp, ctx: &egui::Context) {
             .pivot(Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
+                let mac = ctx.os().is_mac();
                 egui::Grid::new("keys").striped(true).spacing(vec2(24.0, 6.0)).show(ui, |ui| {
                     // The keys that run now, from the keymap.
                     let rows: Vec<(String, String)> = app
@@ -1070,7 +1076,7 @@ pub fn about(app: &mut RustGisApp, ctx: &egui::Context) {
                         .grouped()
                         .into_iter()
                         .map(|(command, params, keys)| {
-                            let keys: Vec<String> = keys.into_iter().map(crate::keymap::Chord::text).collect();
+                            let keys: Vec<String> = keys.into_iter().map(|c| c.text(mac)).collect();
                             (keys.join(" / "), crate::keymap::label(app, command, params))
                         })
                         .collect();
@@ -1083,7 +1089,7 @@ pub fn about(app: &mut RustGisApp, ctx: &egui::Context) {
                     let clipboard: Vec<String> = crate::keymap::CLIPBOARD
                         .iter()
                         .filter_map(|(keys, _)| crate::keymap::Chord::parse(keys))
-                        .map(|c| c.text())
+                        .map(|c| c.text(mac))
                         .collect();
                     let clipboard = clipboard.join(" / ");
                     for (k, d) in [
@@ -1125,7 +1131,7 @@ pub fn notices(app: &mut RustGisApp, ctx: &egui::Context) {
     let mut y = screen.max.y - 40.0;
     for toast in app.map.toasts.iter_mut().rev().take(3) {
         // Keyed by the notice, not the slot, so a selection stays with its text as toasts come and go.
-        let shown = egui::Area::new(egui::Id::new(("toast", toast.id)))
+        let shown = egui::Area::new(egui::Id::unique(("toast", toast.id)))
             .fixed_pos(pos2(screen.max.x - 380.0, y - 44.0))
             .order(egui::Order::Tooltip)
             .show(ctx, |ui| {
@@ -1193,7 +1199,7 @@ mod tests {
         use egui_kittest::kittest::Queryable;
         let mut app = RustGisApp::with_sample();
         app.run("labels.style", serde_json::json!({"layer": "Cities", "size": 20})).unwrap();
-        let mut h = egui_kittest::Harness::builder().with_size(vec2(500.0, 700.0)).build_ui_state(
+        let mut h = egui_kittest::Harness::builder().with_accessibility_check(false).with_size(vec2(500.0, 700.0)).build_ui_state(
             |ui, app: &mut RustGisApp| {
                 let ctx = ui.ctx().clone();
                 shortcuts(app, &ctx);
@@ -1212,7 +1218,7 @@ mod tests {
         h.run();
         assert_eq!(h.state().session.undo_depth(), depth, "the project untouched");
         assert_eq!(h.state().workflow.script, "", "the typing undone");
-        h.ctx.memory_mut(|m| m.surrender_focus(egui::Id::new("script_text")));
+        h.ctx.memory_mut(|m| m.surrender_focus(egui::Id::unique("script_text")));
         h.run();
         h.event(undo);
         h.run();

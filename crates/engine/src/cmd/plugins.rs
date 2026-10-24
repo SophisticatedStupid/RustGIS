@@ -275,6 +275,7 @@ const NEVER: &[&str] = &[
     "connection.duplicate",
     "connection.remove",
     "connection.login",
+    "connection.forgetPassword",
     "connection.test",
     "connection.browse",
     "s3.connect",
@@ -306,6 +307,7 @@ const DATABASES: &[&str] = &[
     "zarr.series",
     "zarr.reduce",
     "cube.trend",
+    "cube.reduce",
 ];
 
 /// What a command reaches beyond the project when run with some parameters.
@@ -443,6 +445,7 @@ impl Bridge<'_> {
             features: rows.iter().take(limit).filter_map(|&i| l.dataset.features.get(i).cloned()).collect(),
             source: None,
             crs: None,
+            crs_incomplete: false,
             windowed: false,
         };
         let mut gj = rustgis_data::io::to_geojson(&ds);
